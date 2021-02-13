@@ -9,6 +9,9 @@ cargo install --git https://github.com/lkucharczyk/yt-cli
 ~/.config/yt-cli.cfg
 
 ```ini
+preview.enable = true
+preview.thumbnails.enable = true
+
 [topic1]
 channel1_name = channel1_id
 channel2_name = channel2_id
@@ -25,6 +28,6 @@ channel3_id
 ## External dependencies:
 - [jq](https://github.com/stedolan/jq)
 - [xq](https://github.com/kislyuk/yq)
-- [ueberzug](https://github.com/seebye/ueberzug)
 - [youtube-dl](https://github.com/ytdl-org/youtube-dl)
 - [mpv](https://github.com/mpv-player/mpv)
+- [ueberzug](https://github.com/seebye/ueberzug) (optional; for previewing thumbnails)

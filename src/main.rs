@@ -8,8 +8,17 @@ use std::fs::File;
 use std::io::{ Read, Write };
 use std::path::Path;
 use std::process::{ Command, Stdio };
-use std::sync::{ Arc, Mutex, Once, mpsc };
+use std::sync::{ Arc, Mutex, Once, atomic::AtomicBool, mpsc };
 use std::time::Duration;
+
+lazy_static::lazy_static! {
+	static ref HOME_DIR : String = String::from( home::home_dir().unwrap_or( env::current_dir().unwrap() ).to_str().unwrap() );
+	static ref CACHE_DIR : String = format!( "{}/.cache/yt-cli", *HOME_DIR );
+
+	static ref UEBERZUG_ENABLE : AtomicBool = AtomicBool::from( true );
+	static ref UEBERZUG_INIT : Once = Once::new();
+	static ref UEBERZUG_TX : Mutex<Option<mpsc::Sender<UeberzugAction>>> = Mutex::new( None );
+}
 
 #[derive( Clone )]
 enum UeberzugAction {
@@ -18,11 +27,19 @@ enum UeberzugAction {
 	Exit
 }
 
-lazy_static::lazy_static! {
-	static ref HOME_DIR : String = String::from( home::home_dir().unwrap_or( env::current_dir().unwrap() ).to_str().unwrap() );
-	static ref CACHE_DIR : String = format!( "{}/.cache/yt-cli", *HOME_DIR );
-	static ref UEBERZUG_INIT : Once = Once::new();
-	static ref UEBERZUG_TX : Mutex<Option<mpsc::Sender<UeberzugAction>>> = Mutex::new( None );
+impl UeberzugAction {
+	fn send( &self ) -> Result<(), mpsc::SendError<UeberzugAction>> {
+		let utx = UEBERZUG_TX.lock().expect( "Failed to lock UEBERZUG_TX" );
+
+		if utx.is_some() {
+			utx
+				.as_ref()
+				.unwrap()
+				.send( self.clone() )
+		} else {
+			Ok(())
+		}
+	}
 }
 
 pub struct YTCli {
@@ -36,6 +53,22 @@ impl YTCli {
 
 		if configpath.exists() {
 			config.load( &path ).expect( "Failed to load config" );
+
+			if
+				!config.getboolcoerce( "default", "preview.thumbnails.enable" )
+					.unwrap_or( Some( true ) )
+					.unwrap_or( true )
+				|| Command::new( "sh" )
+					.arg( "-c" )
+					.arg( "command -v ueberzug" )
+					.stdout( Stdio::piped() )
+					.output()
+					.expect( "Failed to run sh" )
+					.stdout
+					.is_empty()
+			{
+				UEBERZUG_ENABLE.store( false, Ordering::SeqCst );
+			}
 		} else {
 			println!( "{}", Style::from( ansi_term::Color::Red ).bold().paint( format!( "Create a config file ({}) first!", path ) ) );
 		}
@@ -99,7 +132,16 @@ impl YTCli {
 		let options = SkimOptionsBuilder::default()
 			.height( Some( "100%" ) )
 			.multi( true )
-			.preview( Some( "" ) )
+			.preview(
+				match self.config
+					.getboolcoerce( "default", "preview.enable" )
+					.unwrap_or( Some( true ) )
+					.unwrap_or( true )
+				{
+					true => Some( "" ),
+					false => None
+				}
+			)
 			.preview_window( Some( "right:wrap" ) )
 			.build()
 			.unwrap();
@@ -359,14 +401,9 @@ impl YTVideo {
 
 		let pathstr = format!( "{}/thumb/{}.jpg", *CACHE_DIR, self.id );
 		let path = Path::new( &pathstr );
-		let utx = UEBERZUG_TX.lock().expect( "Failed to lock UEBERZUG_TX" );
 
 		if !path.exists() {
-			utx
-				.as_ref()
-				.unwrap()
-				.send( UeberzugAction::Remove )
-				.unwrap();
+			UeberzugAction::Remove.send().expect( "Failed to send data to ueberzug" );
 
 			let res = reqwest::blocking::get( &format!( "https://i.ytimg.com/vi/{}/hq720.jpg", self.id ) ).unwrap();
 			let mut file = File::create( &path ).expect( "Failed to create file" );
@@ -374,11 +411,7 @@ impl YTVideo {
 			file.write( &res.bytes().unwrap() ).unwrap();
 		}
 
-		utx
-			.as_ref()
-			.unwrap()
-			.send( UeberzugAction::Add( self.id.clone(), width ) )
-			.unwrap();
+		UeberzugAction::Add( self.id.clone(), width ).send().expect( "Failed to send data to ueberzug" );
 	}
 }
 
@@ -392,14 +425,21 @@ impl SkimItem for YTVideo {
 
 		let s = self.clone();
 		let w = context.width;
-		std::thread::spawn( move || {
-			s.thumbnail( w );
-		} );
+		let thumb = UEBERZUG_ENABLE.load( Ordering::SeqCst );
+		let mut textoffset = String::new();
+
+		if thumb {
+			std::thread::spawn( move || {
+				s.thumbnail( w );
+			} );
+
+			textoffset = ( 0..=( context.width / ( 1280 / 720 ) / 4 ) ).map( |_| "\n" ).collect();
+		}
 
         ItemPreview::AnsiText(
 			format!(
 				"{}{}\n{} | {}\n\n{}",
-				( 0..=( context.width / ( 1280 / 720 ) / 4 ) ).map( |_| "\n" ).collect::<String>(),
+				textoffset,
 				bold.paint( self.title.clone() ),
 				bold.paint( self.author.clone() ),
 				self.timestamp.format( "%Y-%m-%d %H:%M:%S" ),
@@ -485,15 +525,7 @@ fn main() {
 		if out.len() > 0 {
 			for v in &feed.videos {
 				if v.text() == out[0].text() {
-					let utx = UEBERZUG_TX.lock().expect( "Failed to lock UEBERZUG_TX" );
-
-					if utx.is_some() {
-						utx
-							.as_ref()
-							.unwrap()
-							.send( UeberzugAction::Remove )
-							.unwrap_or_default();
-					}
+					UeberzugAction::Remove.send().expect( "Failed to send data to ueberzug" );
 
 					Command::new( "mpv" )
 						.arg( "--fullscreen" )
@@ -511,17 +543,7 @@ fn main() {
 		};
 	}
 
-	if UEBERZUG_INIT.is_completed() {
-		let utx = UEBERZUG_TX.lock().expect( "Failed to lock UEBERZUG_TX" );
-
-		if utx.is_some() {
-			utx
-				.as_ref()
-				.unwrap()
-				.send( UeberzugAction::Exit )
-				.expect( "Failed to close ueberzug" );
-		}
-	}
+	UeberzugAction::Exit.send().expect( "Failed to close ueberzug" );
 
 	ytcli.clean_cache( Duration::from_secs( 86400 ) ).expect( "Failed to clear cache" );
 }
