@@ -189,6 +189,37 @@ impl YTCli {
 			};
 		} );
 	}
+
+	fn clean_cache( &self, maxage : Duration ) -> std::io::Result<()> {
+		let process = | entry : std::io::Result<std::fs::DirEntry> | -> std::io::Result<()> {
+			let entry = entry?;
+
+			if entry.file_type()?.is_file() {
+				let metadata = entry
+					.path()
+					.metadata()?;
+
+				let age = match metadata.accessed() {
+					Ok( v ) => v,
+					Err( _ ) => metadata.modified()?
+				}.elapsed().unwrap();
+
+				if age > maxage {
+					return std::fs::remove_file( entry.path() );
+				}
+			}
+
+			Ok(())
+		};
+
+		for subdir in vec![ "feed", "thumb" ] {
+			for entry in Path::new( &format!( "{}/{}", *CACHE_DIR, subdir ) ).read_dir()? {
+				process( entry ).unwrap_or_default();
+			}
+		}
+
+		Ok(())
+	}
 }
 
 struct YTFeed {
@@ -454,6 +485,16 @@ fn main() {
 		if out.len() > 0 {
 			for v in &feed.videos {
 				if v.text() == out[0].text() {
+					let utx = UEBERZUG_TX.lock().expect( "Failed to lock UEBERZUG_TX" );
+
+					if utx.is_some() {
+						utx
+							.as_ref()
+							.unwrap()
+							.send( UeberzugAction::Remove )
+							.unwrap_or_default();
+					}
+
 					Command::new( "mpv" )
 						.arg( "--fullscreen" )
 						.arg( v.url() )
@@ -461,10 +502,12 @@ fn main() {
 						.expect( "Failed to start mpv" )
 						.wait()
 						.expect( "Failed to wait for mpv" );
+
+					break;
 				}
 			}
 		} else {
-			break
+			break;
 		};
 	}
 
@@ -479,4 +522,6 @@ fn main() {
 				.expect( "Failed to close ueberzug" );
 		}
 	}
+
+	ytcli.clean_cache( Duration::from_secs( 86400 ) ).expect( "Failed to clear cache" );
 }
