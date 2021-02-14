@@ -523,21 +523,24 @@ fn main() {
 		let out = ytcli.skim( &feed );
 
 		if out.len() > 0 {
-			for v in &feed.videos {
-				if v.text() == out[0].text() {
-					UeberzugAction::Remove.send().expect( "Failed to send data to ueberzug" );
+			UeberzugAction::Remove.send().expect( "Failed to send data to ueberzug" );
 
-					Command::new( "mpv" )
-						.arg( "--fullscreen" )
-						.arg( v.url() )
-						.spawn()
-						.expect( "Failed to start mpv" )
-						.wait()
-						.expect( "Failed to wait for mpv" );
-
-					break;
-				}
-			}
+			Command::new( "mpv" )
+				.arg( "--fullscreen" )
+				.args(
+					out.iter().map( | v | {
+						use std::ops::Deref;
+						v.deref()
+							.as_any()
+							.downcast_ref::<YTVideo>()
+							.expect( &format!( "Failed to retreive \"{}\"'s url", v.text() ) )
+							.url()
+					} )
+				)
+				.spawn()
+				.expect( "Failed to start mpv" )
+				.wait()
+				.expect( "Failed to wait for mpv" );
 		} else {
 			break;
 		};
