@@ -465,11 +465,14 @@ fn main() {
 	opts.optflag( "l", "list-channels", "lists subscribed channels" );
 	opts.optflag( "L", "list-topics", "lists subscribed topics" );
 	opts.optopt( "t", "topics", "show videos only from listed TOPICS", "TOPICS" );
+	opts.optopt( "", "load-subs", "load subscriptions from google takeout json", "FILE" );
 
 	let matches = match opts.parse( &args[1..] ) {
 		Ok( m ) => { m }
 		Err( f ) => { println!( "Error: {}", f.to_string() ); return }
 	};
+
+	let mut feed = None;
 
 	if matches.opt_present( "h" ) {
 		print!( "{}", opts.usage( "yt-cli (https://github.com/lkucharczyk/yt-cli)" ) );
@@ -511,9 +514,27 @@ fn main() {
 		}
 
 		return;
+	} else if matches.opt_present( "load-subs" ) {
+		let path = matches.opt_str( "load-subs" ).unwrap_or_default();
+		let mut data = String::new();
+		let mut file = File::open( &path ).expect( "Failed to open subscriptions file" );
+		file.read_to_string(&mut data).expect( "Failed to read file" );
+		let subsjson = json::parse( &data ).expect( "Invalid JSON provided" );
+		let mut subs : Vec<YTChannel> = Vec::new();
+		for channel in subsjson.members() {
+			subs.push( YTChannel { 
+				id: String::from( channel["snippet"]["resourceId"]["channelId"].as_str().expect( "Invalid JSON provided" ) ),
+				// name: Some( String::from( channel["snippet"]["title"].as_str().expect( "Invalid JSON provided" ) ) )
+				name: None
+			} )
+		}
+		feed = Some( YTFeed::from_channels( subs ) );
 	}
 
-	let feed = YTFeed::from_topics( ytcli.topics( matches.opt_str( "t" ).unwrap_or_default() ) );
+	if feed.is_none(){
+		feed = Some( YTFeed::from_topics( ytcli.topics( matches.opt_str( "t" ).unwrap_or_default() ) ) );
+	}
+	let feed = feed.unwrap();
 	if feed.videos.len() == 0 {
 		println!( "There are no videos available." );
 		return;
